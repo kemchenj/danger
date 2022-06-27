@@ -253,42 +253,46 @@ module Danger
       end
 
       def submit_inline_comments!(warnings: [], errors: [], messages: [], markdowns: [], previous_violations: [], danger_id: "danger")
-        # Avoid doing any fetchs if there's no inline comments
-        return {} if (warnings + errors + messages + markdowns).select(&:inline?).empty?
-
-        diff_lines = self.pr_diff.lines
         pr_comments = client.pull_request_comments(ci_source.repo_slug, ci_source.pull_request_id)
         danger_comments = pr_comments.select { |comment| Comment.from_github(comment).generated_by_danger?(danger_id) }
         non_danger_comments = pr_comments - danger_comments
 
-        warnings = submit_inline_comments_for_kind!(:warning, warnings, diff_lines, danger_comments, previous_violations["warning"], danger_id: danger_id)
-        errors = submit_inline_comments_for_kind!(:error, errors, diff_lines, danger_comments, previous_violations["error"], danger_id: danger_id)
-        messages = submit_inline_comments_for_kind!(:message, messages, diff_lines, danger_comments, previous_violations["message"], danger_id: danger_id)
-        markdowns = submit_inline_comments_for_kind!(:markdown, markdowns, diff_lines, danger_comments, [], danger_id: danger_id)
+        # Avoid doing any fetchs if there's no inline comments
+        begin
+          diff_lines = self.pr_diff.lines
+          return {} if (warnings + errors + messages + markdowns).select(&:inline?).empty?
 
-        # submit removes from the array all comments that are still in force
-        # so we strike out all remaining ones
-        danger_comments.each do |comment|
-          violation = violations_from_table(comment["body"]).first
-          if !violation.nil? && violation.sticky
-            body = generate_inline_comment_body("white_check_mark", violation, danger_id: danger_id, resolved: true, template: "github")
-            client.update_pull_request_comment(ci_source.repo_slug, comment["id"], body)
-          else
-            # We remove non-sticky violations that have no replies
-            replies = non_danger_comments.select do |potential|
-              potential['in_reply_to_id'] == comment['id']
+          warnings = submit_inline_comments_for_kind!(:warning, warnings, diff_lines, danger_comments, previous_violations["warning"], danger_id: danger_id)
+          errors = submit_inline_comments_for_kind!(:error, errors, diff_lines, danger_comments, previous_violations["error"], danger_id: danger_id)
+          messages = submit_inline_comments_for_kind!(:message, messages, diff_lines, danger_comments, previous_violations["message"], danger_id: danger_id)
+          markdowns = submit_inline_comments_for_kind!(:markdown, markdowns, diff_lines, danger_comments, [], danger_id: danger_id)
+
+          {
+            warnings: warnings,
+            errors: errors,
+            messages: messages,
+            markdowns: markdowns
+          }
+        ensure
+          # submit removes from the array all comments that are still in force
+          # so we strike out all remaining ones
+          danger_comments.each do |comment|
+            violation = violations_from_table(comment["body"]).first
+            if !violation.nil? && violation.sticky
+              body = generate_inline_comment_body("white_check_mark", violation, danger_id: danger_id, resolved: true, template: "github")
+              client.update_pull_request_comment(ci_source.repo_slug, comment["id"], body)
+            else
+              next if comment.original_position.nil?
+
+              # We remove non-sticky violations that have no replies
+              replies = non_danger_comments.select do |potential|
+                potential['in_reply_to_id'] == comment['id']
+              end
+
+              client.delete_pull_request_comment(ci_source.repo_slug, comment["id"]) if replies.empty?
             end
-
-            client.delete_pull_request_comment(ci_source.repo_slug, comment["id"]) if replies.empty?
           end
         end
-
-        {
-          warnings: warnings,
-          errors: errors,
-          messages: messages,
-          markdowns: markdowns
-        }
       end
 
       def messages_are_equivalent(m1, m2)
